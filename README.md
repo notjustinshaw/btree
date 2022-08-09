@@ -18,18 +18,34 @@ Unit tests serve as helpful examples of API usage.
 
 ## On disk node structure
 There are two `NodeType` variants - `Internal` and `Leaf`; Each variant has its own predefined structure on disk.
-A leaf node has the following structure:
+An internal node has the following structure:
 ```
-| IS-ROOT 1-byte| NODE-TYPE 1-byte | PARENT OFFSET - 8 bytes | Number of pairs - 8 bytes |
-| Key #0 - 10 bytes | Value #0 - 10 bytes | ...
-| Key #N - 10 bytes | Value #N - 10 bytes |
+0         1           2                           10                          18
++---------+-----------+---------------------------+---------------------------+
+| is_root | node_type | parent_offset (8 bytes)   | num_children (8 bytes)    |
++---------+-----------+----------------+----------+---------------------------+
+| child_offset #0 (8 bytes)            | child_offset #1 (8 bytes)            |
++--------------------------------------+--------------------------------------+
+| child_offset #2 (8 bytes)            | ...                                  |
++--------------------------------------+--------------------------------------+
+| key #0 (10 bytes)                    | key #1 (10 bytes)                    |
++--------------------------------------+--------------------------------------+
+| key #3 (10 bytes)                    | ...                                  |
++--------------------------------------+--------------------------------------+
 ```
 
-While the structure of an internal node on disk is the following:
+While the structure of a leaf node on disk is the following:
 ```
-| IS-ROOT 1-byte | NODE-TYPE 1-byte | PARENT OFFSET - 8 bytes | Number of children - 8 bytes |
-| Key #0 - 10 bytes | Key #2 - 10 bytes | ...
-| Child Offset #0 - 8 bytes | Child offset #1 - 8 bytes | ...
+0         1           2                           10                          18
++---------+-----------+---------------------------+---------------------------+
+| is_root | node_type | parent_offset (8 bytes)   | num_pairs (8 bytes)       |
++---------+-----------+----------------+----------+---------------------------+
+| key #0 (10 bytes)                    | value #0 (10 bytes)                  |
++--------------------------------------+--------------------------------------+
+| ...                                  | ...                                  |
++--------------------------------------+--------------------------------------+
+| key #N (10 bytes)                    | value #N (10 bytes)                  |
++--------------------------------------+--------------------------------------+
 ```
 
 ## Features

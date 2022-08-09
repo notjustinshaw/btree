@@ -4,10 +4,11 @@ use std::cmp::{Eq, Ord, Ordering, PartialOrd};
 use std::convert::From;
 use std::convert::TryFrom;
 
+/// Offset is a wrapper for a pointer to a page
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct Offset(pub usize);
 
-/// Converts an array of length len(usize) to a usize as a BigEndian integer.
+/// Converts an array of length PTR_SIZE to a usize as a BigEndian integer.
 impl TryFrom<[u8; PTR_SIZE]> for Offset {
     type Error = Error;
 
@@ -16,6 +17,7 @@ impl TryFrom<[u8; PTR_SIZE]> for Offset {
     }
 }
 
+/// Key is a wrapper for a string.
 #[derive(Clone, Eq, PartialEq, PartialOrd, Ord, Debug)]
 pub struct Key(pub String);
 
@@ -49,13 +51,13 @@ impl KeyValuePair {
     }
 }
 
-// NodeType Represents different node types in the BTree.
+/// NodeType represents different node types in the BTree (eg. Leaf, Internal, etc.).
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub enum NodeType {
     /// Internal nodes contain a vector of pointers to their children and a vector of keys.
     Internal(Vec<Offset>, Vec<Key>),
 
-    /// Leaf nodes contain a vector of Keys and values.
+    /// Leaf nodes contain a vector of keys and values.
     Leaf(Vec<KeyValuePair>),
 
     Unexpected,

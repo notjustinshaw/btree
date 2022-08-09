@@ -12,8 +12,88 @@ use std::convert::TryFrom;
 /// Value is a wrapper for a value in the page.
 pub struct Value(pub usize);
 
-/// Page is a wrapper for a single page of memory
-/// providing some helpful helpers for quick access.
+/// A wrapper for a single ("slotted") page of memory (ie. 4096 bytes).
+///
+/// To accomodate variable-sized keys and values, the page is divided into three
+/// parts: the header, the pointers, and the "slots". The header is always at
+/// the beginning of the page, followed by the pointers. The slots are always at
+/// the end of the page and grow towards the beginning.
+///
+/// ### Common Node Header
+///
+/// The page header is always at the beginning of the page. It consists of a
+/// single byte that indicates the node type (leaf or internal), a single byte
+/// that indicates whether the page is the root of the tree, and an eight-byte
+/// offset of the parent's page.
+///
+/// ```text
+/// 0         1           2                                 10
+/// +---------+-----------+---------------------------------+
+/// | is_root | node_type | parent_offset (8 bytes)         |
+/// +---------+-----------+---------------------------------+
+/// ```
+///
+/// ### Page Layout
+///
+/// ```text
+/// +----------------------------------+------+------+------+
+/// | page header                      | ptr1 | ptr2 | ptr0 |
+/// +----------------------------------+------+------+------+
+/// |                    (free_space)                       |
+/// +----+----------+-----------------+---------------------+
+/// |    | slot 2   | slot 1          | slot 0              |
+/// +----+----------+-----------------+---------------------+
+/// ```
+///
+/// The pointers are internal to the page, and therefore can be significantly
+/// smaller than PTR_SIZE. Needing only to be able to span 4096 bytes, the
+/// minimum size of a pointer is 12 bits. For now, we'll use a u64 (overkill).
+///
+/// ### Cell Layout
+///
+/// We assume that all cells in the page are of the same type (ie. they hold
+/// only keys or only key-values-pairs, and they are all either fixed-sized or
+/// variable-sized but not a mix of both).
+///
+/// Internal nodes will hold only keys, and leaf nodes will hold only key-value
+/// pairs. For now, all cells are variable-sized. It would be cool to make the
+/// keys fixed-sized for all key types that implement `Sized`, but that's a
+/// project for another day.
+///
+/// A variable-sized cell is laid out as follows:
+/// ```text
+/// 0                    8                                  8 + key_size
+/// +--------------------+----------------------------------+
+/// | [u64] key_size     | [bytes] key                      |
+/// +--------------------+----------------------------------+
+/// ```
+///
+/// A variable-sized key-value pair is laid out as follows:
+/// ```text
+/// 0                           8
+/// +---------------------------+---------------------------+ 16
+/// | [u64] key_size            | [u64] value_size          |
+/// +---------------------------+---------------------------+ 16 + key_size
+/// | [bytes] key                                           |
+/// +-------------------------------------------------------+ .. + value_size
+/// | [bytes] value                                         |
+/// +-------------------------------------------------------+
+/// ```
+///
+/// ### Combining Slotted Cells
+/// ```text
+///           offsets               cells
+/// +--------+--+--+--+------------+----------+-----+-------+
+/// | header |00|01|02| =>       <=|     1    |  0  |   2   |
+/// +--------+--+--+--+------------+-----_----+--_--+---_---+
+///           |  |  |____________________|_______|______|
+///           |  |_______________________|       |
+///           |__________________________________|
+/// ```
+///
+/// Note that the offsets can be ordered independent of the cells they point to.
+/// To delete data, we can either remove the offset or remove both the offset
+/// and the cell.
 pub struct Page {
     data: Box<[u8; PAGE_SIZE]>,
 }
@@ -25,8 +105,8 @@ impl Page {
         }
     }
 
-    /// write_value_at_offset writes a given value (as BigEndian) at a certain offset
-    /// overriding values at that offset.
+    /// Writes a given value (as BigEndian) at a certain offset, overriding
+    /// values at that offset.
     pub fn write_value_at_offset(&mut self, offset: usize, value: usize) -> Result<(), Error> {
         if offset > PAGE_SIZE - PTR_SIZE {
             return Err(Error::UnexpectedError);
@@ -36,7 +116,7 @@ impl Page {
         Ok(())
     }
 
-    /// get_value_from_offset Fetches a value calculated as BigEndian, sized to usize.
+    /// Fetches a value calculated as BigEndian, sized to usize at the given offset.
     /// This function may error as the value might not fit into a usize.
     pub fn get_value_from_offset(&self, offset: usize) -> Result<usize, Error> {
         let bytes = &self.data[offset..offset + PTR_SIZE];
@@ -44,8 +124,8 @@ impl Page {
         Ok(res)
     }
 
-    /// insert_bytes_at_offset pushes #size bytes from offset to end_offset
-    /// inserts #size bytes from given slice.
+    /// Pushes #size bytes from offset to end_offset inserts #size bytes from
+    /// given slice, overwriting existing values.
     pub fn insert_bytes_at_offset(
         &mut self,
         bytes: &[u8],
@@ -64,7 +144,8 @@ impl Page {
         Ok(())
     }
 
-    /// write_bytes_at_offset write bytes at a certain offset overriding previous values.
+    /// Writes #size bytes at the given offset from the given slice,
+    /// overriding previous values.
     pub fn write_bytes_at_offset(
         &mut self,
         bytes: &[u8],
@@ -75,12 +156,12 @@ impl Page {
         Ok(())
     }
 
-    /// get_ptr_from_offset Fetches a slice of bytes from certain offset and of certain size.
+    /// Fetches a slice of #size bytes at the given offset.
     pub fn get_ptr_from_offset(&self, offset: usize, size: usize) -> &[u8] {
         &self.data[offset..offset + size]
     }
 
-    /// get_data returns the underlying array.
+    /// Returns the underlying array.
     pub fn get_data(&self) -> [u8; PAGE_SIZE] {
         *self.data
     }
@@ -196,6 +277,7 @@ impl TryFrom<&[u8]> for Value {
 }
 
 mod tests {
+    #[allow(unused_imports)]
     use crate::error::Error;
 
     #[test]

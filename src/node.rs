@@ -12,8 +12,8 @@ use std::str;
 /// Node represents a node in the BTree occupied by a single page in memory.
 #[derive(Clone, Debug)]
 pub struct Node {
-    pub node_type: NodeType,
     pub is_root: bool,
+    pub node_type: NodeType,
     pub parent_offset: Option<Offset>,
 }
 
@@ -25,6 +25,10 @@ impl Node {
             is_root,
             parent_offset,
         }
+    }
+
+    pub fn is_full(&self) -> Result<bool, Error> {
+        unimplemented!()
     }
 
     /// split creates a sibling node from a given node by splitting the node in two around a median.
