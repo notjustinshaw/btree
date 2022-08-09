@@ -60,7 +60,7 @@ pub struct Value(pub usize);
 /// keys fixed-sized for all key types that implement `Sized`, but that's a
 /// project for another day.
 ///
-/// A variable-sized cell is laid out as follows:
+/// A variable-sized key cell is laid out as follows:
 /// ```text
 /// 0                    8                                  8 + key_size
 /// +--------------------+----------------------------------+
@@ -93,7 +93,8 @@ pub struct Value(pub usize);
 ///
 /// Note that the offsets can be ordered independent of the cells they point to.
 /// To delete data, we can either remove the offset or remove both the offset
-/// and the cell.
+/// and the cell. Since we COW pages, we normally just put the keys pointers in
+/// increasing order and the key values in decreasing order from the back.
 pub struct Page {
     data: Box<[u8; PAGE_SIZE]>,
 }
@@ -203,51 +204,62 @@ impl TryFrom<&Node> for Page {
                     page_offset += PTR_SIZE;
                 }
 
+                let mut freespace_offset = PAGE_SIZE;
                 for Key(key) in keys {
                     let key_bytes = key.as_bytes();
-                    let mut raw_key: [u8; KEY_SIZE] = [0x00; KEY_SIZE];
-                    if key_bytes.len() > KEY_SIZE {
-                        return Err(Error::KeyOverflowError);
-                    } else {
-                        for (i, byte) in key_bytes.iter().enumerate() {
-                            raw_key[i] = *byte;
-                        }
-                    }
-                    data[page_offset..page_offset + KEY_SIZE].clone_from_slice(&raw_key);
-                    page_offset += KEY_SIZE
+                    let key_size: usize = key_bytes.len();
+
+                    // write the key as bytes to the back of the freespace
+                    freespace_offset -= key_size;
+                    data[freespace_offset..freespace_offset + key_size].clone_from_slice(key_bytes);
+
+                    // write the key length as bytes to the back of the freespace
+                    freespace_offset -= PTR_SIZE;
+                    data[freespace_offset..freespace_offset + PTR_SIZE]
+                        .clone_from_slice(&key_size.to_be_bytes());
+
+                    // write the pointer to the front of the freespace block
+                    data[page_offset..page_offset + PTR_SIZE]
+                        .clone_from_slice(&freespace_offset.to_be_bytes());
+                    page_offset += PTR_SIZE;
                 }
             }
             NodeType::Leaf(kv_pairs) => {
                 // num of pairs
+                let num_pairs = kv_pairs.len();
                 data[LEAF_NODE_NUM_PAIRS_OFFSET
                     ..LEAF_NODE_NUM_PAIRS_OFFSET + LEAF_NODE_NUM_PAIRS_SIZE]
-                    .clone_from_slice(&kv_pairs.len().to_be_bytes());
+                    .clone_from_slice(&num_pairs.to_be_bytes());
 
-                let mut page_offset = LEAF_NODE_HEADER_SIZE;
+                let mut ptr_offset = LEAF_NODE_HEADER_SIZE;
+                let mut page_offset = LEAF_NODE_HEADER_SIZE + (num_pairs * PTR_SIZE);
                 for pair in kv_pairs {
-                    let key_bytes = pair.key.as_bytes();
-                    let mut raw_key: [u8; KEY_SIZE] = [0x00; KEY_SIZE];
-                    if key_bytes.len() > KEY_SIZE {
-                        return Err(Error::KeyOverflowError);
-                    } else {
-                        for (i, byte) in key_bytes.iter().enumerate() {
-                            raw_key[i] = *byte;
-                        }
-                    }
-                    data[page_offset..page_offset + KEY_SIZE].clone_from_slice(&raw_key);
-                    page_offset += KEY_SIZE;
+                    // write the ptr to this pair
+                    data[ptr_offset..ptr_offset + PTR_SIZE]
+                        .clone_from_slice(&ptr_offset.to_be_bytes());
+                    ptr_offset += PTR_SIZE;
 
+                    let key_bytes = pair.key.as_bytes();
+                    let key_size: usize = key_bytes.len();
                     let value_bytes = pair.value.as_bytes();
-                    let mut raw_value: [u8; VALUE_SIZE] = [0x00; VALUE_SIZE];
-                    if value_bytes.len() > VALUE_SIZE {
-                        return Err(Error::ValueOverflowError);
-                    } else {
-                        for (i, byte) in value_bytes.iter().enumerate() {
-                            raw_value[i] = *byte;
-                        }
-                    }
-                    data[page_offset..page_offset + VALUE_SIZE].clone_from_slice(&raw_value);
-                    page_offset += VALUE_SIZE;
+                    let value_size: usize = value_bytes.len();
+
+                    // write the key_size followed by the value_size
+                    data[page_offset..page_offset + PTR_SIZE]
+                        .clone_from_slice(&key_size.to_be_bytes());
+                    page_offset += PTR_SIZE;
+
+                    data[page_offset..page_offset + PTR_SIZE]
+                        .clone_from_slice(&value_size.to_be_bytes());
+                    page_offset += PTR_SIZE;
+
+                    // write the key as bytes
+                    data[page_offset..page_offset + key_size].clone_from_slice(key_bytes);
+                    page_offset += key_size;
+
+                    // write the value as bytes
+                    data[page_offset..page_offset + value_size].clone_from_slice(value_bytes);
+                    page_offset += value_size;
                 }
             }
             NodeType::Unexpected => return Err(Error::UnexpectedError),
