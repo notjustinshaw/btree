@@ -3,8 +3,8 @@ use crate::node_type::{Key, KeyValuePair, NodeType, Offset};
 use crate::page::Page;
 use crate::page_layout::{
     FromByte, INTERNAL_NODE_HEADER_SIZE, INTERNAL_NODE_NUM_CHILDREN_OFFSET, IS_ROOT_OFFSET,
-    KEY_SIZE, LEAF_NODE_HEADER_SIZE, LEAF_NODE_NUM_PAIRS_OFFSET, NODE_TYPE_OFFSET,
-    PARENT_POINTER_OFFSET, PTR_SIZE, VALUE_SIZE,
+    LEAF_NODE_HEADER_SIZE, LEAF_NODE_NUM_PAIRS_OFFSET, NODE_TYPE_OFFSET,
+    PARENT_POINTER_OFFSET, PTR_SIZE,
 };
 use std::convert::TryFrom;
 use std::str;
@@ -99,13 +99,20 @@ impl TryFrom<Page> for Node {
 
                 // Number of keys is always one less than the number of children (i.e. branching factor)
                 for _i in 1..num_children {
-                    let key_raw = page.get_ptr_from_offset(offset, KEY_SIZE);
+                    // Read in the key_size and then the key.
+                    let key_size = page.get_value_from_offset(offset)?;
+                    offset += PTR_SIZE;
+                    
+                    // Read in key_size bytes and interpret that as the key.
+                    let key_raw = page.get_ptr_from_offset(offset, key_size);
                     let key = match str::from_utf8(key_raw) {
                         Ok(key) => key,
                         Err(_) => return Err(Error::UTF8Error),
                     };
-                    offset += KEY_SIZE;
-                    // Trim leading or trailing zeros.
+                    offset += key_size;
+
+                    // TODO: I think this was safe to remove, but I'm not sure.
+                    // key.trim_matches(char::from(0)).to_string()
                     keys.push(Key(key.trim_matches(char::from(0)).to_string()));
                 }
                 Ok(Node::new(
@@ -121,21 +128,32 @@ impl TryFrom<Page> for Node {
                 offset = LEAF_NODE_HEADER_SIZE;
 
                 for _i in 0..num_keys_val_pairs {
-                    let key_raw = page.get_ptr_from_offset(offset, KEY_SIZE);
+                    // Read in the key_size and value_size
+                    let key_size = page.get_value_from_offset(offset)?;
+                    offset += PTR_SIZE;
+
+                    let value_size = page.get_value_from_offset(offset)?;
+                    offset += PTR_SIZE;
+
+                    // Read in key_size bytes and interpret that as the key.
+                    let key_raw = page.get_ptr_from_offset(offset, key_size);
                     let key = match str::from_utf8(key_raw) {
                         Ok(key) => key,
                         Err(_) => return Err(Error::UTF8Error),
                     };
-                    offset += KEY_SIZE;
+                    offset += key_size;
 
-                    let value_raw = page.get_ptr_from_offset(offset, VALUE_SIZE);
+                    // Read in value_size bytes and interpret that as the value.
+                    let value_raw = page.get_ptr_from_offset(offset, value_size);
                     let value = match str::from_utf8(value_raw) {
                         Ok(val) => val,
                         Err(_) => return Err(Error::UTF8Error),
                     };
-                    offset += VALUE_SIZE;
+                    offset += value_size;
 
-                    // Trim leading or trailing zeros.
+                    // TODO: I think this was safe to remove, but I'm not sure.
+                    // key.trim_matches(char::from(0)).to_string()
+                    // value.trim_matches(char::from(0)).to_string()
                     pairs.push(KeyValuePair::new(
                         key.trim_matches(char::from(0)).to_string(),
                         value.trim_matches(char::from(0)).to_string(),
@@ -159,8 +177,7 @@ impl TryFrom<Page> for Node {
 mod tests {
     use crate::error::Error;
     use crate::node::{
-        Node, Page, INTERNAL_NODE_HEADER_SIZE, KEY_SIZE, LEAF_NODE_HEADER_SIZE, PTR_SIZE,
-        VALUE_SIZE,
+        Node, Page, INTERNAL_NODE_HEADER_SIZE, LEAF_NODE_HEADER_SIZE, PTR_SIZE,
     };
     use crate::node_type::{Key, NodeType};
     use crate::page_layout::PAGE_SIZE;
@@ -168,14 +185,18 @@ mod tests {
 
     #[test]
     fn page_to_node_works_for_leaf_node() -> Result<(), Error> {
-        const DATA_LEN: usize = LEAF_NODE_HEADER_SIZE + KEY_SIZE + VALUE_SIZE;
+        const KEY: &str = "hello";
+        const VALUE: &str = "world";
+        const DATA_LEN: usize = LEAF_NODE_HEADER_SIZE + 2 * PTR_SIZE + KEY.len() + VALUE.len();
         let page_data: [u8; DATA_LEN] = [
             0x01, // Is-Root byte.
             0x02, // Leaf Node type byte.
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Parent offset.
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // Number of Key-Value pairs.
-            0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x00, 0x00, 0x00, 0x00, 0x00, // "hello"
-            0x77, 0x6f, 0x72, 0x6c, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00, // "world"
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, // len of key "hello"
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, // len of value "world"
+            0x68, 0x65, 0x6c, 0x6c, 0x6f, // "hello"
+            0x77, 0x6f, 0x72, 0x6c, 0x64, // "world"
         ];
         let junk: [u8; PAGE_SIZE - DATA_LEN] = [0x00; PAGE_SIZE - DATA_LEN];
         let mut page = [0x00; PAGE_SIZE];
@@ -192,7 +213,9 @@ mod tests {
     #[test]
     fn page_to_node_works_for_internal_node() -> Result<(), Error> {
         use crate::node_type::Key;
-        const DATA_LEN: usize = INTERNAL_NODE_HEADER_SIZE + 3 * PTR_SIZE + 2 * KEY_SIZE;
+        const KEY: &str = "hello";
+        const VALUE: &str = "world";
+        const DATA_LEN: usize = INTERNAL_NODE_HEADER_SIZE + 5 * PTR_SIZE + KEY.len() + VALUE.len();
         let page_data: [u8; DATA_LEN] = [
             0x01, // Is-Root byte.
             0x01, // Internal Node type byte.
@@ -201,8 +224,10 @@ mod tests {
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, // 4096  (2nd Page)
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, // 8192  (3rd Page)
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x00, // 12288 (4th Page)
-            0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x00, 0x00, 0x00, 0x00, 0x00, // "hello"
-            0x77, 0x6f, 0x72, 0x6c, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00, // "world"
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, // len of key "hello"
+            0x68, 0x65, 0x6c, 0x6c, 0x6f, // "hello"
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, // len of value "world"
+            0x77, 0x6f, 0x72, 0x6c, 0x64, // "world"
         ];
         let junk: [u8; PAGE_SIZE - DATA_LEN] = [0x00; PAGE_SIZE - DATA_LEN];
 

@@ -3,21 +3,16 @@ use crate::node::Node;
 use crate::node_type::{Key, NodeType, Offset};
 use crate::page_layout::{
     ToByte, INTERNAL_NODE_HEADER_SIZE, INTERNAL_NODE_NUM_CHILDREN_OFFSET,
-    INTERNAL_NODE_NUM_CHILDREN_SIZE, IS_ROOT_OFFSET, KEY_SIZE, LEAF_NODE_HEADER_SIZE,
+    INTERNAL_NODE_NUM_CHILDREN_SIZE, IS_ROOT_OFFSET, LEAF_NODE_HEADER_SIZE,
     LEAF_NODE_NUM_PAIRS_OFFSET, LEAF_NODE_NUM_PAIRS_SIZE, NODE_TYPE_OFFSET, PAGE_SIZE,
-    PARENT_POINTER_OFFSET, PARENT_POINTER_SIZE, PTR_SIZE, VALUE_SIZE,
+    PARENT_POINTER_OFFSET, PARENT_POINTER_SIZE, PTR_SIZE,
 };
 use std::convert::TryFrom;
 
 /// Value is a wrapper for a value in the page.
 pub struct Value(pub usize);
 
-/// A wrapper for a single ("slotted") page of memory (ie. 4096 bytes).
-///
-/// To accomodate variable-sized keys and values, the page is divided into three
-/// parts: the header, the pointers, and the "slots". The header is always at
-/// the beginning of the page, followed by the pointers. The slots are always at
-/// the end of the page and grow towards the beginning.
+/// A wrapper for a single page of memory (ie. 4096 bytes).
 ///
 /// ### Common Node Header
 ///
@@ -32,22 +27,6 @@ pub struct Value(pub usize);
 /// | is_root | node_type | parent_offset (8 bytes)         |
 /// +---------+-----------+---------------------------------+
 /// ```
-///
-/// ### Page Layout
-///
-/// ```text
-/// +----------------------------------+------+------+------+
-/// | page header                      | ptr1 | ptr2 | ptr0 |
-/// +----------------------------------+------+------+------+
-/// |                    (free_space)                       |
-/// +----+----------+-----------------+---------------------+
-/// |    | slot 2   | slot 1          | slot 0              |
-/// +----+----------+-----------------+---------------------+
-/// ```
-///
-/// The pointers are internal to the page, and therefore can be significantly
-/// smaller than PTR_SIZE. Needing only to be able to span 4096 bytes, the
-/// minimum size of a pointer is 12 bits. For now, we'll use a u64 (overkill).
 ///
 /// ### Cell Layout
 ///
@@ -79,22 +58,6 @@ pub struct Value(pub usize);
 /// | [bytes] value                                         |
 /// +-------------------------------------------------------+
 /// ```
-///
-/// ### Combining Slotted Cells
-/// ```text
-///           offsets               cells
-/// +--------+--+--+--+------------+----------+-----+-------+
-/// | header |00|01|02| =>       <=|     1    |  0  |   2   |
-/// +--------+--+--+--+------------+-----_----+--_--+---_---+
-///           |  |  |____________________|_______|______|
-///           |  |_______________________|       |
-///           |__________________________________|
-/// ```
-///
-/// Note that the offsets can be ordered independent of the cells they point to.
-/// To delete data, we can either remove the offset or remove both the offset
-/// and the cell. Since we COW pages, we normally just put the keys pointers in
-/// increasing order and the key values in decreasing order from the back.
 pub struct Page {
     data: Box<[u8; PAGE_SIZE]>,
 }
@@ -204,24 +167,18 @@ impl TryFrom<&Node> for Page {
                     page_offset += PTR_SIZE;
                 }
 
-                let mut freespace_offset = PAGE_SIZE;
                 for Key(key) in keys {
                     let key_bytes = key.as_bytes();
                     let key_size: usize = key_bytes.len();
 
-                    // write the key as bytes to the back of the freespace
-                    freespace_offset -= key_size;
-                    data[freespace_offset..freespace_offset + key_size].clone_from_slice(key_bytes);
-
-                    // write the key length as bytes to the back of the freespace
-                    freespace_offset -= PTR_SIZE;
-                    data[freespace_offset..freespace_offset + PTR_SIZE]
-                        .clone_from_slice(&key_size.to_be_bytes());
-
-                    // write the pointer to the front of the freespace block
+                    // write the key_size
                     data[page_offset..page_offset + PTR_SIZE]
-                        .clone_from_slice(&freespace_offset.to_be_bytes());
+                        .clone_from_slice(&key_size.to_be_bytes());
                     page_offset += PTR_SIZE;
+                    
+                    // write the key as bytes to the back of the freespace
+                    data[page_offset..page_offset + key_size].clone_from_slice(key_bytes);
+                    page_offset += key_size;
                 }
             }
             NodeType::Leaf(kv_pairs) => {
@@ -231,14 +188,8 @@ impl TryFrom<&Node> for Page {
                     ..LEAF_NODE_NUM_PAIRS_OFFSET + LEAF_NODE_NUM_PAIRS_SIZE]
                     .clone_from_slice(&num_pairs.to_be_bytes());
 
-                let mut ptr_offset = LEAF_NODE_HEADER_SIZE;
-                let mut page_offset = LEAF_NODE_HEADER_SIZE + (num_pairs * PTR_SIZE);
+                let mut page_offset = LEAF_NODE_HEADER_SIZE;
                 for pair in kv_pairs {
-                    // write the ptr to this pair
-                    data[ptr_offset..ptr_offset + PTR_SIZE]
-                        .clone_from_slice(&ptr_offset.to_be_bytes());
-                    ptr_offset += PTR_SIZE;
-
                     let key_bytes = pair.key.as_bytes();
                     let key_size: usize = key_bytes.len();
                     let value_bytes = pair.value.as_bytes();
