@@ -2,6 +2,7 @@ use crate::error::Error;
 use crate::node::Node;
 use crate::node_type::{Key, KeyValuePair, NodeType, Offset};
 use crate::page::Page;
+use crate::page_layout::{PAGE_SIZE, PTR_SIZE};
 use crate::pager::Pager;
 use crate::wal::Wal;
 use std::cmp;
@@ -82,21 +83,16 @@ impl Default for BTreeBuilder {
 }
 
 impl BTree {
-    fn is_node_full(&self, node: &Node) -> Result<bool, Error> {
-        match &node.node_type {
-            NodeType::Leaf(pairs) => Ok(pairs.len() == (2 * self.b - 1)),
-            NodeType::Internal(_, keys) => Ok(keys.len() == (2 * self.b - 1)),
-            NodeType::Unexpected => Err(Error::UnexpectedError),
-        }
+    /// Returns whether the given node can hold the given key-value pair.
+    /// Assumes the empty space inside a node is contiguous.
+    fn can_hold(&self, node: &Node, pair: &KeyValuePair) -> Result<bool, Error> {
+        let node_size = node.size()?;
+        let pair_size = 2 * PTR_SIZE + pair.key.len() + pair.value.len();
+        Ok(node_size + pair_size <= PAGE_SIZE)
     }
 
     fn is_node_underflow(&self, node: &Node) -> Result<bool, Error> {
-        match &node.node_type {
-            // A root cannot really be "underflowing" as it can contain less than b-1 keys / pointers.
-            NodeType::Leaf(pairs) => Ok(pairs.len() < self.b - 1 && !node.is_root),
-            NodeType::Internal(_, keys) => Ok(keys.len() < self.b - 1 && !node.is_root),
-            NodeType::Unexpected => Err(Error::UnexpectedError),
-        }
+        node.is_underflow()
     }
 
     /// insert a key value pair possibly splitting nodes along the way.
@@ -106,7 +102,7 @@ impl BTree {
         let new_root_offset: Offset;
         let mut new_root: Node;
         let mut root = Node::try_from(root_page)?;
-        if self.is_node_full(&root)? {
+        if !self.can_hold(&root, &kv)? {
             // split the root creating a new root and child nodes along the way.
             new_root = Node::new(NodeType::Internal(vec![], vec![]), true, None);
             // write the new root to disk to aquire an offset for the new root.
@@ -164,7 +160,7 @@ impl BTree {
                 let new_child_offset = self.pager.write_page(Page::try_from(&child)?)?;
                 // Assign copied child at the proper place.
                 children[idx] = new_child_offset.to_owned();
-                if self.is_node_full(&child)? {
+                if !self.can_hold(&child, &kv)? {
                     // split will split the child at b leaving the [0, b-1] keys
                     // while moving the set of [b, 2b-1] keys to the sibling.
                     let (median, mut sibling) = child.split(self.b)?;

@@ -3,7 +3,7 @@ use crate::node_type::{Key, KeyValuePair, NodeType, Offset};
 use crate::page::Page;
 use crate::page_layout::{
     FromByte, INTERNAL_NODE_HEADER_SIZE, INTERNAL_NODE_NUM_CHILDREN_OFFSET, IS_ROOT_OFFSET,
-    LEAF_NODE_HEADER_SIZE, LEAF_NODE_NUM_PAIRS_OFFSET, NODE_TYPE_OFFSET,
+    LEAF_NODE_HEADER_SIZE, LEAF_NODE_NUM_PAIRS_OFFSET, NODE_TYPE_OFFSET, PAGE_SIZE,
     PARENT_POINTER_OFFSET, PTR_SIZE,
 };
 use std::convert::TryFrom;
@@ -27,8 +27,45 @@ impl Node {
         }
     }
 
+    /// Returns the number of bytes required to store this node.
+    pub fn size(&self) -> Result<usize, Error> {
+        match self.node_type {
+            NodeType::Internal(ref children, ref keys) => {
+                let mut size = INTERNAL_NODE_HEADER_SIZE;
+                size += children.len() * PTR_SIZE;
+                for key in keys {
+                    size += PTR_SIZE + key.0.len();
+                }
+                Ok(size)
+            }
+            NodeType::Leaf(ref pairs) => {
+                let mut size = LEAF_NODE_HEADER_SIZE;
+                for pair in pairs {
+                    size += 2 * PTR_SIZE + pair.key.len() + pair.value.len();
+                }
+                Ok(size)
+            }
+            NodeType::Unexpected => Err(Error::UnexpectedError),
+        }
+    }
+
     pub fn is_full(&self) -> Result<bool, Error> {
-        unimplemented!()
+        match self.size() {
+            Ok(size) => Ok(size >= PAGE_SIZE),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub fn is_underflow(&self) -> Result<bool, Error> {
+        if self.is_root {
+            // A root cannot really be "underflowing" as it can contain less
+            // than b-1 keys / pointers.
+            return Ok(false);
+        }
+        match self.size() {
+            Ok(size) => Ok(size < PAGE_SIZE / 2),
+            Err(err) => Err(err),
+        }
     }
 
     /// split creates a sibling node from a given node by splitting the node in two around a median.
@@ -102,7 +139,7 @@ impl TryFrom<Page> for Node {
                     // Read in the key_size and then the key.
                     let key_size = page.get_value_from_offset(offset)?;
                     offset += PTR_SIZE;
-                    
+
                     // Read in key_size bytes and interpret that as the key.
                     let key_raw = page.get_ptr_from_offset(offset, key_size);
                     let key = match str::from_utf8(key_raw) {
@@ -176,9 +213,7 @@ impl TryFrom<Page> for Node {
 #[cfg(test)]
 mod tests {
     use crate::error::Error;
-    use crate::node::{
-        Node, Page, INTERNAL_NODE_HEADER_SIZE, LEAF_NODE_HEADER_SIZE, PTR_SIZE,
-    };
+    use crate::node::{Node, Page, INTERNAL_NODE_HEADER_SIZE, LEAF_NODE_HEADER_SIZE, PTR_SIZE};
     use crate::node_type::{Key, NodeType};
     use crate::page_layout::PAGE_SIZE;
     use std::convert::TryFrom;
